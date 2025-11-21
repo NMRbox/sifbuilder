@@ -27,3 +27,9 @@ sifassemble = "sifbuilder.assembler:main"
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv.pip]
+python-version = "3.12"
+
+[[tool.uv.index]]
+name = "nmrbox"
+url = "https://apt.nmrbox.org/pip"

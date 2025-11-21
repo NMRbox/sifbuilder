@@ -4,7 +4,7 @@ from typing import List
 
 from debian import debian_support
 
-from sifbuilder import _logger, Package
+from sifbuilder import builder_logger, Package
 
 
 def _splitter(line: str):
@@ -94,7 +94,7 @@ class Software:
 def parse_nmrbox_list(src: str = '/var/lib/apt/lists/apt.nmrbox.org_ubuntu20_nmrbox_Packages'):
     packages = collections.defaultdict(list)
     bag = {}
-    _logger.info(f"Parsing {src}")
+    builder_logger.info(f"Parsing {src}")
     with open(src) as f:
         for line in f:
             key, value = _splitter(line)

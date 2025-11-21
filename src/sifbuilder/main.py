@@ -167,7 +167,7 @@ class Builder:
     def sandbox(self):
         """Build writable sandbox directory from def file"""
         self._check_paths()
-        self._run((APPTAINER, 'build', '--sandbox', self.sifpath, self.defpath))
+        self._run((APPTAINER, 'build', '--sandbox', f"{self.sifpath}.sandbox", self.defpath))
 
 
 def main():

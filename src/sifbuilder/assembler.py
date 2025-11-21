@@ -2,6 +2,7 @@ import argparse
 import datetime
 import io
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -14,6 +15,12 @@ from argparser_adapter import ChoiceCommand, ArgparserAdapter
 from sifbuilder import builder_logger
 
 APPTAINER = Path('/usr/bin/apptainer')
+
+
+def executable(path, flags):
+    # O_CREAT | O_WRONLY => create file for writing
+    # 0o755 sets the file mode at creation
+    return os.open(path, flags, 0o755)
 
 _TEMPLATE = """BootStrap: localimage
 From: {base} 
@@ -32,6 +39,8 @@ _LKEY = 'labels'
 _HKEY = 'help'
 _IKEY = 'install'
 
+
+
 actionchoice = argparser_adapter.Choice("action", True, help='Action:')
 
 
@@ -48,12 +57,17 @@ class Builder:
         with open(primary) as f:
             aconfig = yaml.safe_load(f)
         self.base = Path(aconfig['base'])
+        self.installed = aconfig['installed']
+        self.wrapper_dir = Path(aconfig['wrappers'])
         if not self.base.is_file():
-            raise ValueError(f"Invalid base {self.base.as_posix()}")
+            raise FileNotFoundError(f"Invalid base {self.base.as_posix()}")
+        if not self.wrapper_dir.is_dir():
+            raise FileNotFoundError(f"invalid wrapper directory {self.wrapper_dir.as_posix()}")
         product = aconfig['product']
         self.defpath = Path(product + '.def')
         self.sifpath = Path(product + '.sif')
         self.apps = {}
+        self.build_wrappers = False
 
     def _set_path(self,current:Path,config,key)->Path:
         if (v := config.get(key)) is not None:
@@ -97,11 +111,22 @@ class Builder:
                     for env, value in edict.get('append', {}).items():
                         print(f'    export {env}=${env}:{value}', file=f)
                     app_d[_EKEY] = f.getvalue()
-            if (rlist :=  app_cfg.get("run", [])):
-                with io.StringIO() as f:
-                    for cmd in rlist:
-                        print(f'    {cmd}', file=f)
-                    app_d[_RKEY] = f.getvalue()
+            if (rspec :=  app_cfg.get("run", None)) is not None:
+                if isinstance(rspec,dict):
+                    for app, cmd in rspec.items():
+                        with io.StringIO() as f:
+                            print(f'    {cmd}', file=f)
+                            if app in self.apps:
+                                app_d[_RKEY] = f.getvalue()
+                            else:
+                                self.apps[app] = {_RKEY: f.getvalue()}
+                elif isinstance(rspec,list):
+                    with io.StringIO() as f:
+                        for cmd in rspec:
+                            print(f'    {cmd}', file=f)
+                        app_d[_RKEY] = f.getvalue()
+                else:
+                    raise ValueError(f"Unsuported {_RKEY} {type(rspec)}")
             labels = app_cfg.get("labels", {})
             if labels:
                 with io.StringIO() as f:
@@ -178,6 +203,8 @@ class Builder:
         """Build single sif from def file"""
         self._check_paths()
         self._run((APPTAINER, 'build', self.sifpath, self.defpath))
+        if self.build_wrappers:
+            self.wrappers()
 
     @ChoiceCommand(actionchoice)
     def sandbox(self):
@@ -185,6 +212,19 @@ class Builder:
         self._check_paths()
         self._run((APPTAINER, 'build', '--sandbox', self.sifpath, self.defpath))
 
+    @ChoiceCommand(actionchoice)
+    def wrappers(self):
+        """Generate wrappers to invoke app in container"""
+        for app,data in self.apps.items():
+            if 'run' in data:
+                wfile = self.wrapper_dir / app
+                if wfile.is_file() and not self.force:
+                    builder_logger.warning(f"{wfile.as_posix()} exists")
+                    continue
+                with open(wfile,'w',opener=executable) as f:
+                    print('#!/bin/bash',file=f)
+                    print(f'  exec {APPTAINER} --app {app} {self.installed} "$@"',file=f)
+                builder_logger.info(f"Generated {wfile.as_posix()}")
 
 @dataclass
 class ParseSpec:
@@ -231,11 +271,13 @@ def main():
     parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
     parser.add_argument('--force', action='store_true', help="Overwrite existing def and sif")
     parser.add_argument('--nolog', action='store_true', help="Apptainer output to stdout/stderr instead of log files")
+    parser.add_argument('--wrappers', action='store_true', help="Generate wrappers with 'sif'")
 
     args = parser.parse_args()
     builder_logger.setLevel(getattr(logging, args.loglevel))
     builder.force = args.force
     builder.nolog = args.nolog
+    builder.make_wrappers = args.wrappers
     builder.load(args.primary)
     dp = _DirectoryParser(ParseSpec(args.directory,args.depth))
     yamls = dp.parse()
