@@ -15,8 +15,7 @@ import yaml
 from argparser_adapter import ChoiceCommand, ArgparserAdapter
 
 import sifbuilder
-from sifbuilder import builder_logger
-from sifbuilder.subversion_parser import subversion_info
+from sifbuilder import builder_logger, SvnInfo
 
 APPTAINER = Path('/usr/bin/apptainer')
 
@@ -192,7 +191,7 @@ class Builder:
     def _add_source_labels(self,f):
         print('%labels',file=f)
         for origin, p in self.origins.items():
-            ident = subversion_info(p).ident()
+            ident = SvnInfo.subversion_info(p).ident()
             print(f'    org.nmrbox.{origin}: "{ident}"',file=f)
 
     def __add_runscript(self, f):
