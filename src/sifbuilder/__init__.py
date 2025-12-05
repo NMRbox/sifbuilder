@@ -1,7 +1,7 @@
 import logging
+import importlib.metadata 
 builder_logger = logging.getLogger(__name__)
-__version__ = 1.0
-
+__version__ =  importlib.metadata.version('sifbuilder') 
 
 class Package:
     """A debian package supporting NMRbox software"""
@@ -42,8 +42,23 @@ class Package:
         return None
 
 
+class SvnInfo:
+    __slots__ = ['Path',
+                 'Name',
+                 'Working_Copy_Root_Path',
+                 'Relative_URL',
+                 'Repository_UUID',
+                 'Revision',
+                 'Node_Kind',
+                 'Schedule',
+                 'Last_Changed_Author',
+                 'Last_Changed_Rev',
+                 'Checksum',
+                 '_synced',
+                 '_status']
 
-
-
-
-
+    def ident(self,force:bool=False)->str:
+        """Return identifier for committed SVN file"""
+        if not force and not self._synced:
+            raise ValueError(f"Unsupported SVN state {self.Schedule} {self._status}")
+        return f'{self.Relative_URL} {self.Revision}'
