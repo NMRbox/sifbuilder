@@ -177,7 +177,7 @@ class Builder:
             installs = set()
             print(_TEMPLATE.format(base=self.base), file=f)
             self._add_enviroment(f)
-            self._add_source_labels(f)
+            self._add_sys_labels(f)
             for app, data in self.apps.items():
                 for scifkey in (_IKEY, _LKEY, _EKEY, _HKEY):
                     if (stanza := data.get(scifkey, None)) is not None:
@@ -201,11 +201,14 @@ class Builder:
         """Add environment setting from config, if any"""
         print(_ENV, file=f)
 
-    def _add_source_labels(self, f):
+    def _add_sys_labels(self, f):
+        """Add source labels and info about embedded exes"""
         print('%labels', file=f)
         for origin, p in self.origins.items():
             ident = SourceInfo.parse(p).ident(force=self.force)
             print(f'    org.nmrbox.{origin}: "{ident}"', file=f)
+        for cmd, path in self.commands.items():
+            print(f'    org.nmrbox.executable.{cmd}: "{path}"', file=f)
 
     def _check_paths(self):
         """Check paths, raise error or overwrite, depending on self.force"""
