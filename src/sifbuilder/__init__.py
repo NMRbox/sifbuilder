@@ -41,4 +41,4 @@ class Package:
             return Package(data)
         return None
 
-from subversion_parser import SvnInfo
+from sifbuilder.sourceinfo import SourceInfo

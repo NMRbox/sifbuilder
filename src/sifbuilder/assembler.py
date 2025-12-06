@@ -8,14 +8,14 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Iterable
+from typing import List, Iterable, Any
 
 import argparser_adapter
 import yaml
 from argparser_adapter import ChoiceCommand, ArgparserAdapter
 
 import sifbuilder
-from sifbuilder import builder_logger, SvnInfo
+from sifbuilder import builder_logger, SourceInfo
 
 APPTAINER = Path('/usr/bin/apptainer')
 
@@ -54,20 +54,31 @@ class Builder:
         self.nolog = False
         self.build_wrappers = False
         self.software: list[str] = []
-        self._control : Path |None = None
+        self._control: Path | None = None
         self.apps = {}
         self.origins = {}
+        self.software_map = {}
+        self.software_explorer = True
 
     @property
     def control(self):
         return self._control
 
     @control.setter
-    def control(self,value):
+    def control(self, value):
         if value:
             self._control = Path(value)
             if not self.control.is_file():
                 raise FileNotFoundError(self.control.as_posix())
+
+    def _load_directory(self,config:dict,key:str):
+        """Get directory out of config, verify parent, and make it"""
+        directory = Path(config[key])
+        if not directory.is_dir():
+            if not directory.parent.is_dir():
+                raise FileNotFoundError(f"invalid {key} parent directory {directory.parent.as_posix()}")
+            directory.mkdir()
+        return directory
 
     def load(self, primary):
         """load configuration"""
@@ -75,24 +86,13 @@ class Builder:
             aconfig = yaml.safe_load(f)
         self.base = Path(aconfig['base'])
         self.installed = aconfig['installed']
-        self.wrapper_dir = Path(aconfig['wrappers'])
+        self.wrapper_dir = self._load_directory(aconfig,'wrappers')
+        self.sw_exp_dir = self._load_directory(aconfig,'software explorer')
         if not self.base.is_file():
             raise FileNotFoundError(f"Invalid base {self.base.as_posix()}")
-        if not self.wrapper_dir.is_dir():
-            if not self.wrapper_dir.parent.is_dir():
-                raise FileNotFoundError(f"invalid wrapper parent directory {self.wrapper_dir.parent.as_posix()}")
-            self.wrapper_dir.mkdir()
         product = aconfig['product']
         self.defpath = Path(product + '.def')
         self.sifpath = Path(product + '.sif')
-
-    #    def _set_path(self,current:Path,config,key)->Path:
-    #        if (v := config.get(key)) is not None:
-    #            vpath = Path(v)
-    #            if current is None or current == v:
-    #                return v
-    #        return current
-    #
 
     def configure(self, yamls: Iterable[str | Path]) -> None:
         if not yamls:
@@ -140,11 +140,8 @@ class Builder:
                                 app_d[_RKEY] = f.getvalue()
                             else:
                                 self.apps[app] = {_RKEY: f.getvalue()}
-                elif isinstance(rspec, list):
-                    with io.StringIO() as f:
-                        for cmd in rspec:
-                            print(f'    {cmd}', file=f)
-                        app_d[_RKEY] = f.getvalue()
+                elif isinstance(rspec, str):
+                    app_d[_RKEY] = f'    {rspec}'
                 else:
                     raise ValueError(f"Unsuported {_RKEY} {type(rspec)}")
             labels = app_cfg.get("labels", {})
@@ -159,7 +156,16 @@ class Builder:
                     for h in help:
                         print(f'    {h}', file=f)
                     app_d[_HKEY] = f.getvalue()
-            self.software.extend(s.upper() for s in app_cfg.get('software',[]))
+            if (sw := app_cfg.get('software')) is not None:
+                if isinstance(sw, dict):
+                    for cmd, software in sw.items():
+                        self.software.append(software)
+                        self.software_map[software] = cmd
+                else:
+                    if not isinstance(sw, str):
+                        raise ValueError(f"software must be dictionary or str. Error in {app} {sw}")
+                    self.software.append(sw)
+                    self.software_map[sw] = app
 
     @ChoiceCommand(actionchoice)
     def version(self):
@@ -180,27 +186,19 @@ class Builder:
                     if (stanza := data.get(scifkey, None)) is not None:
                         print(f'\n%app{scifkey} {app}', file=f)
                         print(stanza, file=f)
-            self.__add_runscript(f)
         print(f"Wrote {self.defpath}")
         self._update_control()
+        self.gen_swe()
 
     def _add_enviroment(self, f):
         """Add environment setting from config, if any"""
         print(_ENV, file=f)
 
-    def _add_source_labels(self,f):
-        print('%labels',file=f)
+    def _add_source_labels(self, f):
+        print('%labels', file=f)
         for origin, p in self.origins.items():
-            ident = SvnInfo.subversion_info(p).ident()
-            print(f'    org.nmrbox.{origin}: "{ident}"',file=f)
-
-    def __add_runscript(self, f):
-        return
-        runlist = self.config.get("run", [])
-        if runlist:
-            print('\n%runscript', file=f)
-            for cmd in runlist:
-                print(f'   {cmd} ', file=f)
+            ident = SourceInfo.parse(p).ident(force=self.force)
+            print(f'    org.nmrbox.{origin}: "{ident}"', file=f)
 
     def _check_paths(self):
         """Check paths, raise error or overwrite, depending on self.force"""
@@ -240,7 +238,8 @@ class Builder:
                 content = f.readlines()
             output = []
             for line in content:
-                if line.startswith('XB-Nmrbox-Software') or line.startswith('XB-Nmrbox-Include'):
+                #                if line.startswith('XB-Nmrbox-Software') or line.startswith('XB-Nmrbox-Include'):
+                if line.startswith('XB-Nmrbox-Include'):
                     parts = line.split(':')
                     if len(parts) != 2:
                         raise ValueError(f"{line} did not split into two")
@@ -253,14 +252,14 @@ class Builder:
                 return
             ordered = sorted(self.software)
             assert len(ordered) > 0
-            with open(self.control,'w') as f:
+            with open(self.control, 'w') as f:
                 for line in output:
-                    print(line,file=f)
-                print(f"XB-Nmrbox-Software: {ordered[0]}",file=f)
-                for index, software in enumerate(ordered[1:]):
-                    print(f"XB-Nmrbox-Include{index}: {software}",file=f)
+                    print(line, file=f)
+                #                print(f"XB-Nmrbox-Software: {ordered[0]}",file=f)
+                for index, software in enumerate(ordered):
+                    print(f"XB-Nmrbox-Include{index}: {software}", file=f)
             print(f"{self.control.as_posix()} updated")
-            self.control = None # make idempotent
+            self.control = None  # make idempotent
 
     @ChoiceCommand(actionchoice)
     def sif(self):
@@ -297,6 +296,19 @@ class Builder:
                     print(f'exec {APPTAINER} run --app {app} {self.installed} "$@"', file=f)
                 builder_logger.info(f"Generated {wfile.as_posix()}")
 
+    @ChoiceCommand(actionchoice)
+    def gen_swe(self):
+        """Generarate software explorer files"""
+        if self.software_explorer:
+            app_names = self.apps.keys()
+            for sw, cmd in self.software_map.items():
+                if cmd not in app_names:
+                    raise ValueError(f"Invalid software exceuctable {cmd} for {sw}")
+                with open(self.sw_exp_dir / sw.upper( ), 'w') as f:
+                    print("# nmrbox 20 subsystem", file=f)
+                    ytext = yaml.dump([cmd], explicit_start=True,explicit_end=True)
+                    print(ytext, file=f)
+
 
 @dataclass
 class ParseSpec:
@@ -326,7 +338,7 @@ class _DirectoryParser:
                 subs = [d for d in dpath.iterdir() if d.is_dir()]
                 self._parse(subs, depth - 1)
 
-    def parse(self)->List[Path]:
+    def parse(self) -> List[Path]:
         """Find and return YAMLS"""
         if self.spec.directories:
             dpaths = [Path(d) for d in self.spec.directories]
@@ -336,9 +348,28 @@ class _DirectoryParser:
             return self.yamls
 
 
+class CopyParser(argparse.ArgumentParser):
+
+    def __init__(self, *args, **kwargs):
+        self.copy = []
+        super().__init__(*args, **kwargs)
+
+    def add_argument(self, *args, **kwargs):
+        if (is_copy := kwargs.get('copy', False)):
+            del kwargs['copy']
+        f = super().add_argument(*args, **kwargs)
+        if is_copy:
+            self.copy.append(f.dest)
+        return f
+
+    def transfer(self, ns: argparse.Namespace, client: Any) -> None:
+        for field in self.copy:
+            setattr(client, field, getattr(ns, field))
+
+
 def main():
     logging.basicConfig()
-    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
+    parser = CopyParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('primary', help="primary configuration file")
     builder = Builder()
     adapter = ArgparserAdapter(builder)
@@ -346,20 +377,21 @@ def main():
     parser.add_argument('-d', '--directory', action='append', help="Directory to scan for yamls")
     parser.add_argument('--depth', type=int, default=0, help="How far to descond into directories looking for yamls")
     parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
-    parser.add_argument('--force', action='store_true', help="Overwrite existing def and sif")
-    parser.add_argument('--nolog', action='store_true', help="Apptainer output to stdout/stderr instead of log files")
-    parser.add_argument('--wrappers', action='store_true', help="Generate wrappers with 'sif'")
-    parser.add_argument('--control', help="Add software tags to control file")
+    parser.add_argument('--force', action='store_true', help="Overwrite existing def and sif", copy=True)
+    parser.add_argument('--nolog', action='store_true', help="Apptainer output to stdout/stderr instead of log files",
+                        copy=True)
+    parser.add_argument('--no_wrappers', dest='build_wrappers', action='store_false',
+                        help="Skip building wrappers'", copy=True)
+    parser.add_argument('--no-software-explorer',action='store_false',dest='software_explorer',
+                        help="Skip building software explorer drop-ins", copy=True)
+    parser.add_argument('--control', help="Add software tags to control file", copy=True)
 
     args = parser.parse_args()
     builder_logger.setLevel(getattr(logging, args.loglevel))
-    builder.force = args.force
-    builder.nolog = args.nolog
-    builder.build_wrappers = args.wrappers
-    builder.control = args.control
-    builder.load(args.primary)
+    parser.transfer(args, builder)
     dp = _DirectoryParser(ParseSpec(args.directory, args.depth))
     yamls = dp.parse()
+    builder.load(args.primary)
     builder.configure(yamls)
 
     adapter.call_specified_methods(args)

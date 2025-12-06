@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-class SvnInfo:
+class SourceInfo:
     __slots__ = ['Path',
                  'Name',
                  'Working_Copy_Root_Path',
@@ -26,9 +26,9 @@ class SvnInfo:
 
 
     @staticmethod
-    def subversion_info(yfile: Path)->'SvnInfo':
+    def parse(yfile: Path)-> 'SourceInfo':
         assert yfile.is_file()
-        info = SvnInfo()
+        info = SourceInfo()
         cp = subprocess.run(('svn', 'info', yfile.as_posix()), capture_output=True, text=True)
         if cp.returncode != 0:
             print(cp.stderr, file=sys.stderr)
@@ -54,5 +54,5 @@ class SvnInfo:
 
 
 if __name__ == "__main__":
-    i = SvnInfo.subversion_info(Path(sys.argv[1]))
+    i = SourceInfo.parse(Path(sys.argv[1]))
     print(i.ident())
