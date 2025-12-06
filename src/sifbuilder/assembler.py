@@ -55,9 +55,10 @@ class Builder:
         self.build_wrappers = False
         self.software: list[str] = []
         self._control: Path | None = None
-        self.apps = {}
-        self.origins = {}
-        self.software_map = {}
+        self.apps = {} # clients from found YAML
+        self.commands ={} # commands execute in sif
+        self.origins = {} # Source of YAML file
+        self.software_map = {} # executable to NMRbox software
         self.software_explorer = True
 
     @property
@@ -116,8 +117,8 @@ class Builder:
         ordered = {c['app']: c for c in configs}
         for appname in sorted(ordered.keys()):
             app_cfg = ordered[appname]
-            app = app_cfg['app']
-            self.apps[app] = (app_d := {})
+            cmdn = app_cfg['app']
+            self.apps[cmdn] = (app_d := {})
             pkgs = app_cfg.get('packages', None)
             f: io.StringIO
             if pkgs:
@@ -133,15 +134,10 @@ class Builder:
                     app_d[_EKEY] = f.getvalue()
             if (rspec := app_cfg.get("run", None)) is not None:
                 if isinstance(rspec, dict):
-                    for app, cmd in rspec.items():
-                        with io.StringIO() as f:
-                            print(f'    {cmd}', file=f)
-                            if app in self.apps:
-                                app_d[_RKEY] = f.getvalue()
-                            else:
-                                self.apps[app] = {_RKEY: f.getvalue()}
+                    for cmd, path_in_sif in rspec.items():
+                        self.commands[cmd] = path_in_sif
                 elif isinstance(rspec, str):
-                    app_d[_RKEY] = f'    {rspec}'
+                    self.commands[cmdn] = rspec
                 else:
                     raise ValueError(f"Unsuported {_RKEY} {type(rspec)}")
             labels = app_cfg.get("labels", {})
@@ -158,14 +154,14 @@ class Builder:
                     app_d[_HKEY] = f.getvalue()
             if (sw := app_cfg.get('software')) is not None:
                 if isinstance(sw, dict):
-                    for cmd, software in sw.items():
+                    for path_in_sif, software in sw.items():
                         self.software.append(software)
-                        self.software_map[software] = cmd
+                        self.software_map[software] = path_in_sif
                 else:
                     if not isinstance(sw, str):
-                        raise ValueError(f"software must be dictionary or str. Error in {app} {sw}")
+                        raise ValueError(f"software must be dictionary or str. Error in {cmdn} {sw}")
                     self.software.append(sw)
-                    self.software_map[sw] = app
+                    self.software_map[sw] = cmdn
 
     @ChoiceCommand(actionchoice)
     def version(self):
@@ -178,14 +174,25 @@ class Builder:
             raise ValueError(f"{self.defpath.as_posix()} already present")
         builder_logger.info(f"generating {self.defpath.as_posix()}")
         with open(self.defpath, 'w') as f:
+            installs = set()
             print(_TEMPLATE.format(base=self.base), file=f)
             self._add_enviroment(f)
             self._add_source_labels(f)
             for app, data in self.apps.items():
-                for scifkey in (_IKEY, _RKEY, _LKEY, _EKEY, _HKEY):
+                for scifkey in (_IKEY, _LKEY, _EKEY, _HKEY):
                     if (stanza := data.get(scifkey, None)) is not None:
                         print(f'\n%app{scifkey} {app}', file=f)
                         print(stanza, file=f)
+                    if scifkey == _IKEY:
+                        installs.add(app)
+            for cmd, path in self.commands.items():
+                assert cmd.strip() == cmd
+                if cmd not in installs:
+                    print(f'\n%appinstall {cmd}', file=f)
+                    print(f'    :', file=f)
+                print(f'\n%apprun {cmd}', file=f)
+                print(f'   exec {path} "$@"',file=f)
+
         print(f"Wrote {self.defpath}")
         self._update_control()
         self.gen_swe()
@@ -215,21 +222,22 @@ class Builder:
                 self.sifpath.unlink()
         self.sifpath.parent.mkdir(exist_ok=True)
 
-    def _run(self, cmd_i):
-        """Run a command after displaying to user. Exit on error"""
+    def _run(self, cmd_i,verify:bool=True)->subprocess.CompletedProcess:
+        """Run a command after displaying to user. If verify and error, exit program"""
         cmd = [item.as_posix() if isinstance(item, Path) else item for item in cmd_i]
         print(f"Running: {' '.join(cmd)}")
         if self.nolog:
-            subprocess.run(cmd)
+            cp = subprocess.run(cmd)
         else:
             sname = self.sifpath.name
             ts = datetime.datetime.now().strftime(f"{sname}-%b%d-%H:%M:%S.log")
             with open(ts, 'w') as logfile:
                 print(f"logging to {logfile.name}")
                 cp = subprocess.run(cmd, stdout=logfile, stderr=subprocess.STDOUT)
-                if cp.returncode != 0:
-                    print(f"Returned: {cp.returncode}")
-                    sys.exit(cp.returncode)
+        if cp.returncode != 0:
+            print(f"Returned: {cp.returncode}")
+            sys.exit(cp.returncode)
+        return cp
 
     def _update_control(self):
         if self.control and self.software:
@@ -285,22 +293,21 @@ class Builder:
     @ChoiceCommand(actionchoice)
     def wrappers(self):
         """Generate wrappers to invoke app in container"""
-        for app, data in self.apps.items():
-            if 'run' in data:
-                wfile = self.wrapper_dir / app
-                if wfile.is_file() and not self.force:
-                    builder_logger.warning(f"{wfile.as_posix()} exists")
-                    continue
-                with open(wfile, 'w', opener=executable) as f:
-                    print('#!/bin/bash', file=f)
-                    print(f'exec {APPTAINER} run --app {app} {self.installed} "$@"', file=f)
-                builder_logger.info(f"Generated {wfile.as_posix()}")
+        for command in self.commands.keys():
+            wfile = self.wrapper_dir / command
+            if wfile.is_file() and not self.force:
+                builder_logger.warning(f"{wfile.as_posix()} exists")
+                continue
+            with open(wfile, 'w', opener=executable) as f:
+                print('#!/bin/bash', file=f)
+                print(f'exec {APPTAINER} run --app {command} {self.installed} "$@"', file=f)
+            builder_logger.info(f"Generated {wfile.as_posix()}")
 
     @ChoiceCommand(actionchoice)
     def gen_swe(self):
         """Generarate software explorer files"""
         if self.software_explorer:
-            app_names = self.apps.keys()
+            app_names = self.commands.keys()
             for sw, cmd in self.software_map.items():
                 if cmd not in app_names:
                     raise ValueError(f"Invalid software exceuctable {cmd} for {sw}")
@@ -309,6 +316,22 @@ class Builder:
                     ytext = yaml.dump([cmd], explicit_start=True,explicit_end=True)
                     print(ytext, file=f)
 
+    @ChoiceCommand(actionchoice)
+    def validatesif(self):
+        if not self.sifpath.is_file():
+            raise FileNotFoundError(self.sifpath.as_posix())
+        bad = False
+        for command, path in self.commands.items() :
+            cmd = ('/usr/bin/sudo',APPTAINER.as_posix(),'exec',self.sifpath.as_posix(),'ls',path)
+            builder_logger.debug(f"Running {cmd}")
+            cp = subprocess.run(cmd,text=True,capture_output=True)
+            if cp.returncode != 0:
+                bad = True
+                builder_logger.warning(f"Run check failed for {command} {path}")
+            else:
+                builder_logger.info(f"{command} {path} good")
+        if bad:
+            raise ValueError("Run command not found in sif")
 
 @dataclass
 class ParseSpec:
