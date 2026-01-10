@@ -192,6 +192,7 @@ class Builder:
                     print(f'    :', file=f)
                 print(f'\n%apprun {cmd}', file=f)
                 print(f'   exec {path} "$@"',file=f)
+            self._add_help(f)
 
         print(f"Wrote {self.defpath}")
         self._update_control()
@@ -203,12 +204,19 @@ class Builder:
 
     def _add_sys_labels(self, f):
         """Add source labels and info about embedded exes"""
-        print('%labels', file=f)
+        print('\n%labels', file=f)
         for origin, p in self.origins.items():
             ident = SourceInfo.parse(p).ident(force=self.force)
-            print(f'    org.nmrbox.{origin}: "{ident}"', file=f)
+            print(f'    org.nmrbox.{origin} {ident}', file=f)
         for cmd, path in self.commands.items():
-            print(f'    org.nmrbox.executable.{cmd}: "{path}"', file=f)
+            print(f'    org.nmrbox.executable.{cmd} {path}', file=f)
+        print(f'    org.nmrbox.software {','.join(self.software)}',file=f)
+
+    def _add_help(self, f):
+        print('\n%help', file=f)
+        print('    The Ubuntu20 of the following NMRbox software is present',file=f)
+        for sw in self.software:
+            print(f"      - {sw.upper()}",file=f)
 
     def _check_paths(self):
         """Check paths, raise error or overwrite, depending on self.force"""
