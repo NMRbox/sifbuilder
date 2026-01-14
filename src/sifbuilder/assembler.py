@@ -29,7 +29,8 @@ def executable(path, flags):
 _TEMPLATE = """BootStrap: localimage
 From: {base} 
 
-%setup
+%post
+    # runs inside the container before the %appinstall sections
 	apt-get -qq update 
 """
 
@@ -240,7 +241,7 @@ class Builder:
             cp = subprocess.run(cmd)
         else:
             sname = self.sifpath.name
-            ts = datetime.datetime.now().strftime(f"{sname}-%b%d-%H:%M:%S.log")
+            ts = datetime.datetime.now().strftime(f"log-{sname}-%b%d-%H_%M_%S")
             with open(ts, 'w') as logfile:
                 print(f"logging to {logfile.name}")
                 cp = subprocess.run(cmd, stdout=logfile, stderr=subprocess.STDOUT)
