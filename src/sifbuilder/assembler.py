@@ -29,8 +29,7 @@ def executable(path, flags):
 _TEMPLATE = """BootStrap: localimage
 From: {base} 
 
-%post
-	export DEBIAN_FRONTEND=noninteractive
+%setup
 	apt-get -qq update 
 """
 
@@ -168,7 +167,7 @@ class Builder:
         print(sifbuilder.__version__)
 
     @ChoiceCommand(actionchoice)
-    def generate(self):
+    def generate_def(self):
         """generate def file"""
         if self.defpath.exists() and not self.force:
             raise ValueError(f"{self.defpath.as_posix()} already present")
@@ -223,7 +222,7 @@ class Builder:
         if not APPTAINER.is_file():
             raise ValueError(f"{APPTAINER.as_posix()} not found. Install apptainer debian package")
         if not self.defpath.is_file() or self.force:
-            self.generate()
+            self.generate_def()
         if self.sifpath.exists():
             if not self.force:
                 raise ValueError(f"{self.sifpath.as_posix()} already present")
