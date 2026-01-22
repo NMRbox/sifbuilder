@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 from pathlib import Path
 
 def iter_stanzas(path: Path):
@@ -20,7 +21,15 @@ def find_nmrbox_software(status_path=Path("/var/lib/dpkg/status")):
                 fields[k.strip()] = v.strip()
         if fields.get("Status") == "install ok installed" and "Nmrbox-Software" in fields:
             print(fields["Nmrbox-Software"].upper())
+            includes = [fields[inc] for inc in fields.keys() if inc.startswith('Nmrbox-Include')]
+            for inc in includes:
+                print(inc.upper())
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description='List NMRbox software installed on current system',
+                                     epilog='Used to generate exclusion list for generating assembly files')
+    parser.parse_args()
     find_nmrbox_software()
 
+if __name__ == "__main__":
+    main()

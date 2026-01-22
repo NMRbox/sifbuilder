@@ -13,13 +13,15 @@ import logging
 import os
 import socket
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sifbuilder import builder_logger
-import sifbuilder
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+import sifbuilder
+from sifbuilder import builder_logger
 
 __version__ = "1.3.0"
 
@@ -66,10 +68,17 @@ def find_executables_in_package(package_name: str) -> list[tuple[str, str]]:
     return executables
 
 
-PackageInfo = tuple[str | None, str | None, str | None]
+@dataclass
+class PkgSoftware:
+    software: str
+    software_version: str
+    package_version: str
+
+    def __post_init__(self):
+        self.software = self.software.upper()
 
 
-def parse_dpkg_status(package_name: str | None = None) -> dict[str, PackageInfo]:
+def parse_dpkg_status(package_name: str | None = None) -> dict[str, PkgSoftware]:
     """
     Parse /var/lib/dpkg/status to find package information.
 
@@ -85,31 +94,32 @@ def parse_dpkg_status(package_name: str | None = None) -> dict[str, PackageInfo]
         builder_logger.warning(f"Error: Status file not found: {status_file}")
         return {}
 
-    packages = {}
-    current_package = software_name = version_type = version = None
+    packages: dict[str, PkgSoftware] = {}
+    fields: dict[str, str] = {}
+
+    def commit():
+        pkg = fields.get("Package")
+        software = fields.get("Nmrbox-Software")
+        if pkg and software:
+            packages[pkg] = PkgSoftware(software, fields.get("Nmrbox-Version"), fields.get("Version"))
 
     try:
         with open(status_file, "r") as f:
             for line in f:
-                line = line.strip()
+                line = line.rstrip()
 
-                if line.startswith("Package:"):
-                    if current_package and software_name:
-                        packages[current_package] = (software_name, version_type, version)
-                    current_package = line.split(":", 1)[1].strip()
-                    software_name = version_type = version = None
+                if not line:  # blank line → end of stanza
+                    commit()
+                    fields.clear()
+                    continue
 
-                elif line.startswith("Version:"):
-                    version = line.split(":", 1)[1].strip()
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    fields[k.strip()] = v.strip()
 
-                elif line.startswith("Nmrbox-Software:"):
-                    software_name = line.split(":", 1)[1].strip()
-
-                elif line.startswith("Nmrbox-Version:"):
-                    version_type = line.split(":", 1)[1].strip()
-
-            if current_package and software_name:
-                packages[current_package] = (software_name, version_type, version)
+            # last stanza (file may not end with blank line)
+            if fields:
+                commit()
 
     except PermissionError as e:
         builder_logger.warning(f"Error: Permission denied reading {status_file}: {e}")
@@ -117,69 +127,8 @@ def parse_dpkg_status(package_name: str | None = None) -> dict[str, PackageInfo]
 
     if package_name:
         return {package_name: packages[package_name]} if package_name in packages else {}
+
     return packages
-
-
-def oldparse_dpkg_status(package_name=None):
-    """
-    Parse /var/lib/dpkg/status to find package information.
-    
-    Args:
-        package_name: Name of specific package, or None to find all NMRBox packages
-        
-    Returns:
-        If package_name is specified: Tuple of (software_name, version_type, version)
-        If package_name is None: Dict of {package_name: (software_name, version_type, version)}
-    """
-    status_file = Path("/var/lib/dpkg/status")
-
-    if not status_file.exists():
-        builder_logger.warning(f"Error: Status file not found: {status_file}")
-        return None if package_name else {}
-
-    packages = {}
-    current_package = None
-    software_name = None
-    version_type = None
-    version = None
-
-    try:
-        with open(status_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-
-                # Start of a package entry
-                if line.startswith('Package:'):
-                    # Save previous package if it had Nmrbox-Software
-                    if current_package and software_name:
-                        packages[current_package] = (software_name, version_type, version)
-
-                    # Reset for new package
-                    current_package = line.split(':', 1)[1].strip()
-                    software_name = None
-                    version_type = None
-                    version = None
-
-                elif line.startswith('Version:'):
-                    version = line.split(':', 1)[1].strip()
-
-                elif line.startswith('Nmrbox-Software:'):
-                    software_name = line.split(':', 1)[1].strip()
-
-                elif line.startswith('Nmrbox-Version:'):
-                    version_type = line.split(':', 1)[1].strip()
-
-            # Don't forget the last package
-            if current_package and software_name:
-                packages[current_package] = (software_name, version_type, version)
-    except PermissionError as e:
-        builder_logger.warning(f"Error: Permission denied reading {status_file}: {e}")
-        return None if package_name else {}
-
-    if package_name:
-        return packages.get(package_name, (None, None, None))
-    else:
-        return packages
 
 
 def get_yaml_filename_from_package(package_name: str) -> str:
@@ -212,40 +161,22 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
     # Parse package information
     if package_info is None:
         builder_logger.info(f"Parsing package information for: {package_name}")
-        info = parse_dpkg_status(package_name)
-        if package_name not in info:
+        pkg_dict = parse_dpkg_status(package_name)
+        if package_name not in pkg_dict:
             builder_logger.warning(f"Error: Package {package_name} not found")
             return False
-        software_name, version_type, pkg_version = info[package_name]
+        info = pkg_dict[package_name]
     else:
-        software_name, version_type, pkg_version = package_info
-        builder_logger.info(f"Processing package: {package_name}")
+        info = package_info
 
-    if not software_name:
-        builder_logger.warning(f"Error: Could not find Nmrbox-Software field for {package_name}")
-        builder_logger.warning(f"Package may not be an NMRBox software package")
-        return False
-
-    builder_logger.info(f"Found software: {software_name}")
-    if version_type:
-        builder_logger.info(f"Version type: {version_type}")
-    if pkg_version:
-        builder_logger.info(f"Package version: {pkg_version}")
-
-    # Find executables
+    builder_logger.info(f"Package {package_info} is {info}")
     builder_logger.info("Searching for executables...")
-
     executables = find_executables_in_package(package_name)
-
     if not executables:
         builder_logger.warning(f"Warning: No executables found on PATH for {package_name}")
     else:
         builder_logger.info(f"Found {len(executables)} executable(s)")
-
-    # Create YAML structure
     config = CommentedMap()
-
-    # Add header comment with generation metadata
     hostname = socket.gethostname()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     program_name = f"{sifbuilder.__name__}.{Path(sys.argv[0]).name}"
@@ -257,23 +188,16 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         f"Package: {package_name}"
     )
 
-    if pkg_version:
-        header_comment += f"\nPackage Version: {pkg_version}"
-
+    header_comment += f"\nPackage Version: {info.package_version}"
     config.yaml_set_start_comment(header_comment)
-
     config['sifassembly'] = True
-
-    config['app'] = software_name
-
+    config['app'] = info.software.lower()
     packages_list = CommentedSeq([package_name])
     config['packages'] = packages_list
-
-    config['software'] = software_name
+    config['software'] = info.software
 
     if executables:
         run_section = CommentedMap()
-
         # Sort executables by name for consistent output
         executables.sort(key=lambda x: x[0])
 
@@ -300,7 +224,7 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         builder_logger.warning(f"Error writing {output_file}: {e}")
         return False
 
-    builder_logger.info(f"  Software: {software_name}")
+    builder_logger.info(f"  Software: {info.software}")
     builder_logger.info(f"  Package: {package_name}")
     builder_logger.info(f"  Commands:")
     for exe_name, _ in executables:
@@ -322,13 +246,13 @@ def process_all_packages(excluded: set[str]) -> None:
 
     builder_logger.info(f"Found {len(packages)} NMRBox package(s)")
 
-    for package_name in sorted(packages.keys()):
-        if package_name in excluded:
-            builder_logger.info(f"Skipping excluded package: {package_name}")
+    for package_name,info in packages.items():
+        if info.software in excluded:
+            builder_logger.info(f"Skipping excluded software: {package_name} {info.software}")
             continue
         try:
             # Pass the package info to avoid re-reading dpkg status
-            generate_yaml_config(package_name, package_info=packages[package_name])
+            generate_yaml_config(package_name, package_info=info)
         except PermissionError as e:
             builder_logger.warning(f"Warning: Permission denied processing {package_name}: {e}")
         except Exception as e:

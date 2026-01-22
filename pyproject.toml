@@ -23,6 +23,7 @@ where = ["src"]  # Specify the "src" directory to look for packages
 sifbuilder = "sifbuilder.main:main"
 sifassemble = "sifbuilder.assembler:main"
 generate-assembly = "sifbuilder.generate:main"
+list-software = "sifbuilder.list_current_software:main"
 
 [build-system]
 requires = ["setuptools"]
