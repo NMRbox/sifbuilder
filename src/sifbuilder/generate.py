@@ -32,6 +32,65 @@ def find_executables_in_package(package_name: str) -> list[tuple[str, str]]:
     Returns: (executable_name, full_path) tuples
     """
     list_file = Path(f"/var/lib/dpkg/info/{package_name}.list")
+    if not list_file.exists():
+        builder_logger.warning(f"Error: Package list file not found: {list_file}")
+        return []
+
+    # Get PATH directories
+    path_dirs = os.environ.get('PATH', '').split(':')
+    path_dirs = [Path(p) for p in path_dirs if p]
+
+    # Build set of files owned by package
+    package_files = set()
+    try:
+        with open(list_file, 'r') as f:
+            for line in f:
+                file_path = Path(line.strip())
+                try:
+                    # Resolve symlinks to get canonical path
+                    if file_path.exists():
+                        package_files.add(file_path.resolve())
+                except (PermissionError, OSError):
+                    continue
+    except PermissionError as e:
+        builder_logger.warning(f"Warning: Permission denied reading {list_file}: {e}")
+        return []
+
+    executables = []
+
+    # Check each PATH directory for executables
+    for path_dir in path_dirs:
+        if not path_dir.exists():
+            continue
+
+        try:
+            for item in path_dir.iterdir():
+                # Check if executable
+                try:
+                    if not os.access(item, os.X_OK):
+                        continue
+                except PermissionError:
+                    continue
+
+                # Resolve symlink to check if it points to a package file
+                try:
+                    resolved = item.resolve()
+                    if resolved in package_files:
+                        executables.append((item.name, str(item)))
+                except (PermissionError, OSError):
+                    continue
+
+        except PermissionError:
+            continue
+
+    return executables
+
+def old_find_executables_in_package(package_name: str) -> list[tuple[str, str]]:
+    """
+    Find all executable files from a package that are on PATH.
+    Returns: (executable_name, full_path) tuples
+    """
+    list_file = Path(f"/var/lib/dpkg/info/{package_name}.list")
 
     if not list_file.exists():
         builder_logger.warning(f"Error: Package list file not found: {list_file}")
