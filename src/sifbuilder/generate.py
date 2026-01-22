@@ -32,7 +32,7 @@ def find_executables_in_package(package_name: str) -> list[tuple[str, str]]:
     list_file = Path(f"/var/lib/dpkg/info/{package_name}.list")
 
     if not list_file.exists():
-        print(f"Error: Package list file not found: {list_file}", file=sys.stderr)
+        builder_logger.warning(f"Error: Package list file not found: {list_file}")
         return []
 
     # Get PATH directories
@@ -60,7 +60,7 @@ def find_executables_in_package(package_name: str) -> list[tuple[str, str]]:
                 if file_path.parent in path_dirs:
                     executables.append((file_path.name, str(file_path)))
     except PermissionError as e:
-        print(f"Warning: Permission denied reading {list_file}: {e}", file=sys.stderr)
+        builder_logger.warning(f"Warning: Permission denied reading {list_file}: {e}")
         return []
 
     return executables
@@ -82,7 +82,7 @@ def parse_dpkg_status(package_name: str | None = None) -> dict[str, PackageInfo]
     status_file = Path("/var/lib/dpkg/status")
 
     if not status_file.exists():
-        print(f"Error: Status file not found: {status_file}", file=sys.stderr)
+        builder_logger.warning(f"Error: Status file not found: {status_file}")
         return {}
 
     packages = {}
@@ -112,7 +112,7 @@ def parse_dpkg_status(package_name: str | None = None) -> dict[str, PackageInfo]
                 packages[current_package] = (software_name, version_type, version)
 
     except PermissionError as e:
-        print(f"Error: Permission denied reading {status_file}: {e}", file=sys.stderr)
+        builder_logger.warning(f"Error: Permission denied reading {status_file}: {e}")
         return {}
 
     if package_name:
@@ -134,7 +134,7 @@ def oldparse_dpkg_status(package_name=None):
     status_file = Path("/var/lib/dpkg/status")
 
     if not status_file.exists():
-        print(f"Error: Status file not found: {status_file}", file=sys.stderr)
+        builder_logger.warning(f"Error: Status file not found: {status_file}")
         return None if package_name else {}
 
     packages = {}
@@ -173,7 +173,7 @@ def oldparse_dpkg_status(package_name=None):
             if current_package and software_name:
                 packages[current_package] = (software_name, version_type, version)
     except PermissionError as e:
-        print(f"Error: Permission denied reading {status_file}: {e}", file=sys.stderr)
+        builder_logger.warning(f"Error: Permission denied reading {status_file}: {e}")
         return None if package_name else {}
 
     if package_name:
@@ -214,7 +214,7 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         builder_logger.info(f"Parsing package information for: {package_name}")
         info = parse_dpkg_status(package_name)
         if package_name not in info:
-            print(f"Error: Package {package_name} not found", file=sys.stderr)
+            builder_logger.warning(f"Error: Package {package_name} not found")
             return False
         software_name, version_type, pkg_version = info[package_name]
     else:
@@ -222,8 +222,8 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         builder_logger.info(f"Processing package: {package_name}")
 
     if not software_name:
-        print(f"Error: Could not find Nmrbox-Software field for {package_name}", file=sys.stderr)
-        print(f"Package may not be an NMRBox software package", file=sys.stderr)
+        builder_logger.warning(f"Error: Could not find Nmrbox-Software field for {package_name}")
+        builder_logger.warning(f"Package may not be an NMRBox software package")
         return False
 
     builder_logger.info(f"Found software: {software_name}")
@@ -238,7 +238,7 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
     executables = find_executables_in_package(package_name)
 
     if not executables:
-        print(f"Warning: No executables found on PATH for {package_name}", file=sys.stderr)
+        builder_logger.warning(f"Warning: No executables found on PATH for {package_name}")
     else:
         builder_logger.info(f"Found {len(executables)} executable(s)")
 
@@ -284,7 +284,7 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
 
         config['run'] = run_section
     else:
-        print(f"No executables found for {package_name}", file=sys.stderr)
+        builder_logger.warning(f"No executables found for {package_name}")
         return False
 
     if output_file is None:
@@ -294,10 +294,10 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         with open(output_file, 'w') as f:
             yaml.dump(config, f)
     except PermissionError as e:
-        print(f"Error: Permission denied writing to {output_file}: {e}", file=sys.stderr)
+        builder_logger.warning(f"Error: Permission denied writing to {output_file}: {e}")
         return False
     except Exception as e:
-        print(f"Error writing {output_file}: {e}", file=sys.stderr)
+        builder_logger.warning(f"Error writing {output_file}: {e}")
         return False
 
     builder_logger.info(f"  Software: {software_name}")
@@ -317,7 +317,7 @@ def process_all_packages(excluded: set[str]) -> None:
     packages = parse_dpkg_status()
 
     if not packages:
-        print("No NMRBox packages found", file=sys.stderr)
+        builder_logger.warning("No NMRBox packages found")
         return
 
     builder_logger.info(f"Found {len(packages)} NMRBox package(s)")
@@ -330,10 +330,9 @@ def process_all_packages(excluded: set[str]) -> None:
             # Pass the package info to avoid re-reading dpkg status
             generate_yaml_config(package_name, package_info=packages[package_name])
         except PermissionError as e:
-            print(f"Warning: Permission denied processing {package_name}: {e}", file=sys.stderr)
+            builder_logger.warning(f"Warning: Permission denied processing {package_name}: {e}")
         except Exception as e:
-            print(f"Error processing {package_name}: {e}", file=sys.stderr)
-        print()
+            builder_logger.warning(f"Error processing {package_name}: {e}")
 
 
 def main():
