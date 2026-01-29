@@ -33,8 +33,6 @@ _ENV = """%environment
     export LC_ALL=C"""
 
 actionchoice = argparser_adapter.Choice("action", True, help='Action:')
-
-
 class Builder:
 
     def __init__(self):
@@ -129,7 +127,7 @@ class Builder:
             for cmd in runlist:
                 print(f'   {cmd} ',file=f)
 
-    def _check_paths(self):
+    def _check_paths(self, *,caller_is_sandbox:bool):
         """Check paths, raise error or overwrite, depending on self.force"""
         if not APPTAINER.is_file():
             raise ValueError(f"{APPTAINER.as_posix()} not found. Install apptainer debian package")
@@ -160,13 +158,13 @@ class Builder:
     @ChoiceCommand(actionchoice)
     def sif(self):
         """Build single sif from def file"""
-        self._check_paths()
+        self._check_paths(caller_is_sandbox=False)
         self._run((APPTAINER, 'build', self.sifpath, self.defpath))
 
     @ChoiceCommand(actionchoice)
     def sandbox(self):
         """Build writable sandbox directory from def file"""
-        self._check_paths()
+        self._check_paths(caller_is_sandbox=True)
         self._run((APPTAINER, 'build', '--sandbox', f"{self.sifpath}.sandbox", self.defpath))
 
 
