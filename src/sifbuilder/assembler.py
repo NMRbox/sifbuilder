@@ -40,7 +40,10 @@ From: {base}
     apt-get clean
 
 %runscript
-    echo "{sif} built $NOW"
+    /usr/bin/zcat {readme_path}
+
+%apprun metadata
+    echo "{sif} built {built}"
     /usr/bin/zcat {metadata_path}
 
 """
@@ -66,10 +69,10 @@ class Builder:
         self.build_wrappers = False
         self.software: list[str] = []
         self._control: Path | None = None
-        self.apps = {} # clients from found YAML
-        self.commands ={} # commands execute in sif
-        self.origins = {} # Source of YAML file
-        self.software_map = {} # executable to NMRbox software
+        self.apps = {}  # clients from found YAML
+        self.commands = {}  # commands execute in sif
+        self.software_map = {}  # executable to NMRbox software
+        self.configuration_data = []  # record of configuration data for metadata file
         self.software_explorer = True
 
     @property
@@ -83,7 +86,7 @@ class Builder:
             if not self.control.is_file():
                 raise FileNotFoundError(self.control.as_posix())
 
-    def _load_directory(self,config:dict,key:str):
+    def _load_directory(self, config: dict, key: str):
         """Get directory out of config, verify parent, and make it"""
         directory = Path(config[key])
         if not directory.is_dir():
@@ -100,6 +103,8 @@ class Builder:
         self.base = Path(aconfig['base'])
         self.installed = aconfig['installed']
         self.support_packages = aconfig['support packages']
+        self.readme = aconfig['readme']
+        self.use_sandbox = aconfig['sandbox build']
         self.files = {}
         for src, dest in aconfig['files'].items():
             source = Path(src)
@@ -108,8 +113,8 @@ class Builder:
                 self.files[source.as_posix()] = dest
         self.metadata = aconfig.get('metadata')
 
-        self.wrapper_dir = self._load_directory(aconfig,'wrappers')
-        self.sw_exp_dir = self._load_directory(aconfig,'software explorer')
+        self.wrapper_dir = self._load_directory(aconfig, 'wrappers')
+        self.sw_exp_dir = self._load_directory(aconfig, 'software explorer')
         if not self.base.is_file():
             raise FileNotFoundError(f"Invalid base {self.base.as_posix()}")
         self.product = aconfig['product']
@@ -118,12 +123,20 @@ class Builder:
         self.sifpath = Path(self.product + '.sif')
 
     @property
-    def metadata_name(self)->str:
+    def metadata_name(self) -> str:
         return f"{self.product}.gz"
 
     @property
-    def metadata_path(self)->str:
+    def metadata_path(self) -> str:
         return f"/opt/{self.metadata_name}"
+
+    @property
+    def readme_name(self) -> str:
+        return f"{self.product}.README.gz"
+
+    @property
+    def readme_path(self) -> str:
+        return f"/opt/{self.readme_name}"
 
     def configure(self, yamls: Iterable[str | Path]) -> None:
         """Configure individual software item YAMLS"""
@@ -133,19 +146,18 @@ class Builder:
         bad = [m for m in paths if not m.is_file()]
         if bad:
             raise ValueError(f"Missing yaml file {','.join(bad)}")
-        configs = []
         for p in paths:
             builder_logger.debug(f"Evaluate {p.as_posix()}")
             try:
                 with open(p) as f:
                     dc = yaml.safe_load(f)
                     if dc.get('sifassembly', False):
-                        dc['_origin'] = p
+                        dc['_origin'] = SourceInfo.parse(p).ident()
                         builder_logger.info(f"Reading {p.as_posix()}")
-                        configs.append(dc)
+                        self.configuration_data.append(dc)
             except Exception as e:
                 builder_logger.info(f"Fail to parse {p.as_posix()} {e}")
-        ordered = {c['app']: c for c in configs}
+        ordered = {c['app']: c for c in self.configuration_data}
         for appname in sorted(ordered.keys()):
             app_cfg = ordered[appname]
             cmdn = app_cfg['app']
@@ -188,11 +200,13 @@ class Builder:
             if (sw := app_cfg.get('software')) is not None:
                 if isinstance(sw, dict):
                     for path_in_sif, software in sw.items():
+                        software = software.upper()
                         self.software.append(software)
                         self.software_map[software] = path_in_sif
                 else:
                     if not isinstance(sw, str):
                         raise ValueError(f"software must be dictionary or str. Error in {cmdn} {sw}")
+                    sw = sw.upper()
                     self.software.append(sw)
                     self.software_map[sw] = cmdn
 
@@ -207,14 +221,20 @@ class Builder:
             raise ValueError(f"{self.defpath.as_posix()} already present")
         builder_logger.info(f"generating {self.defpath.as_posix()}")
         with open(self.defpath, 'w') as f:
-            #installs = set()
-            header = _TEMPLATE.format(base=self.base,sif=self.sifpath.name, support=' '.join(self.support_packages),
-                                      metadata_path=self.metadata_path)
-            print(header,file=f)
+            # installs = set()
+            built = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%b-%d")
+            header = _TEMPLATE.format(base=self.base,
+                                      sif=self.sifpath.name,
+                                      support=' '.join(self.support_packages),
+                                      metadata_path=self.metadata_path,
+                                      readme_path=self.readme_path,
+                                      built=built)
+            print(header, file=f)
             print('%files', file=f)
-            print(f'    {self.metadata_name} {self.metadata_path}',file=f)
+            print(f'    {self.metadata_name} {self.metadata_path}', file=f)
+            print(f'    {self.readme_name} {self.readme_path}', file=f)
             for src, dest in self.files.items():
-                print(f'    {src} {dest}',file=f)
+                print(f'    {src} {dest}', file=f)
             print(file=f)
             self.add_environment(f)
             self._add_sys_labels(f)
@@ -228,11 +248,11 @@ class Builder:
 
             for cmd, path in self.commands.items():
                 assert cmd.strip() == cmd
-#                if cmd not in installs:
-#                    print(f'\n%appinstall {cmd}', file=f)
-#                    print(f'    :', file=f)
+                #                if cmd not in installs:
+                #                    print(f'\n%appinstall {cmd}', file=f)
+                #                    print(f'    :', file=f)
                 print(f'\n%apprun {cmd}', file=f)
-                print(f'   exec {path} "$@"',file=f)
+                print(f'   exec {path} "$@"', file=f)
             self._add_help(f)
 
         print(f"Wrote {self.defpath}")
@@ -246,31 +266,31 @@ class Builder:
     def _add_sys_labels(self, f):
         """Add source labels and info about embedded exes %labels and our metadata file"""
         print('\n%labels', file=f)
-        print(f'    org.nmrbox.software {','.join(self.software)}', file=f)
-        origins = {}
-        for origin, p in self.origins.items():
-            ident = SourceInfo.parse(p).ident(force=self.force)
-            origins[origin] = ident
+        print(f'    org.nmrbox.software {",".join(self.software)}', file=f)
         executables = {}
         for cmd, path in self.commands.items():
             executables[cmd] = path
-        metadata = {'software':list(self.software),'origins':origins,'executables':executables}
-        with gzip.open(self.metadata_name,'wt',encoding='utf-8') as mf:
-            yaml.dump(metadata,mf, width=float("inf"), default_flow_style=False,explicit_start=True,explicit_end=True)
+        metadata = {'software': list(self.software), 'executables': executables,
+                    'configuration': self.configuration_data}
+        with gzip.open(self.metadata_name, 'wt', encoding='utf-8') as mf:
+            yaml.dump(metadata, mf, width=float("inf"), default_flow_style=False, explicit_start=True,
+                      explicit_end=True)
+        with gzip.open(self.readme_name, 'wt', encoding='utf-8') as mf:
+            mf.write(self.readme)
 
     def _add_help(self, f):
         print('\n%help', file=f)
-        print('    The Ubuntu20 of the following NMRbox software is present',file=f)
+        print('    The Ubuntu20 of the following NMRbox software is present', file=f)
         for sw in self.software:
-            print(f"      - {sw.upper()}",file=f)
+            print(f"      - {sw.upper()}", file=f)
 
-    def _check_paths(self,*,caller_is_sandbox:bool):
+    def _check_paths(self, *, caller_is_sandbox: bool):
         """Check paths, raise error or overwrite, depending on self.force"""
         if not APPTAINER.is_file():
             raise ValueError(f"{APPTAINER.as_posix()} not found. Install apptainer debian package")
         if not self.defpath.is_file() or self.force:
             self.generate_def()
-        if not caller_is_sandbox: # avoid recursive call
+        if self.use_sandbox and not caller_is_sandbox:  # avoid recursive call
             if not self.sandbox_path.is_dir() or self.force:
                 self.sandbox()
         if self.sifpath.exists():
@@ -282,7 +302,7 @@ class Builder:
                 self.sifpath.unlink()
         self.sifpath.parent.mkdir(exist_ok=True)
 
-    def _run(self, cmd_i,verify:bool=True)->subprocess.CompletedProcess:
+    def _run(self, cmd_i, verify: bool = True) -> subprocess.CompletedProcess:
         """Run a command after displaying to user. If verify and error, exit program"""
         cmd = [item.as_posix() if isinstance(item, Path) else item for item in cmd_i]
         print(f"Running: {' '.join(cmd)}")
@@ -306,32 +326,33 @@ class Builder:
                 content = f.readlines()
             output = []
             for line in content:
-                #                if line.startswith('XB-Nmrbox-Software') or line.startswith('XB-Nmrbox-Include'):
-                if line.startswith('XB-Nmrbox-Include'):
-                    parts = line.split(':')
-                    if len(parts) != 2:
-                        raise ValueError(f"{line} did not split into two")
-                    current.add(parts[1].strip().upper())
-                else:
+                if not line.startswith('XB-Nmrbox-Include'):
                     output.append(line.rstrip(' \n'))
-            updated = set(self.software)
-            if updated == current:
-                builder_logger.info(f"Control unchanged")
-                return
             ordered = sorted(self.software)
             assert len(ordered) > 0
+            first_package = False
+            added_includes = False
             with open(self.control, 'w') as f:
                 for line in output:
+                    if not added_includes:
+                        if not first_package and line.startswith('Package'):
+                            first_package = True
+                            builder_logger.debug(f"{line} first package")
+                        if first_package and len(line.strip()) == 0:
+                            for index, software in enumerate(ordered):
+                                print(f"XB-Nmrbox-Include{index}: {software}", file=f)
+                            added_includes = True
+                            builder_logger.info('added Nmrbox-Includes')
                     print(line, file=f)
-                #                print(f"XB-Nmrbox-Software: {ordered[0]}",file=f)
-                for index, software in enumerate(ordered):
-                    print(f"XB-Nmrbox-Include{index}: {software}", file=f)
             print(f"{self.control.as_posix()} updated")
             self.control = None  # make idempotent
 
     @ChoiceCommand(actionchoice)
     def sif(self):
         """Build single sif from def file"""
+        #
+        # Build via sandbox or directly from sif depending on YAML configuration
+        #
         self._check_paths(caller_is_sandbox=False)
         if self.build_wrappers:
             self.wrappers()
@@ -340,7 +361,10 @@ class Builder:
         if (uid := os.geteuid()) != 0:
             builder_logger.debug(f"uid is {uid}, adding fakeroot")
             cmd.append('--fakeroot')
-        cmd.extend((self.sifpath, self.sandbox_path))
+        if self.use_sandbox:
+            cmd.extend((self.sifpath, self.sandbox_path))
+        else:
+            cmd.extend((self.sifpath, self.defpath))
         self._run(cmd)
         self._update_control()
 
@@ -368,9 +392,9 @@ class Builder:
         """Generarate software explorer files"""
         if self.software_explorer:
             for sw, cmd in self.software_map.items():
-                with open(self.sw_exp_dir / sw.upper( ), 'w') as f:
+                with open(self.sw_exp_dir / sw.upper(), 'w') as f:
                     print("# nmrbox 20 subsystem", file=f)
-                    ytext = yaml.dump([cmd], explicit_start=True,explicit_end=True)
+                    ytext = yaml.dump([cmd], explicit_start=True, explicit_end=True)
                     print(ytext, file=f)
 
     @ChoiceCommand(actionchoice)
@@ -378,10 +402,10 @@ class Builder:
         if not self.sifpath.is_file():
             raise FileNotFoundError(self.sifpath.as_posix())
         bad = False
-        for command, path in self.commands.items() :
-            cmd = ('/usr/bin/sudo',APPTAINER.as_posix(),'exec',self.sifpath.as_posix(),'ls',path)
+        for command, path in self.commands.items():
+            cmd = ('/usr/bin/sudo', APPTAINER.as_posix(), 'exec', self.sifpath.as_posix(), 'ls', path)
             builder_logger.debug(f"Running {cmd}")
-            cp = subprocess.run(cmd,text=True,capture_output=True)
+            cp = subprocess.run(cmd, text=True, capture_output=True)
             if cp.returncode != 0:
                 bad = True
                 builder_logger.warning(f"Run check failed for {command} {path}")
@@ -389,6 +413,7 @@ class Builder:
                 builder_logger.info(f"{command} {path} good")
         if bad:
             raise ValueError("Run command not found in sif")
+
 
 @dataclass
 class ParseSpec:
@@ -431,7 +456,6 @@ class _DirectoryParser:
 class CopyParser(argparse.ArgumentParser):
     """Parse that copies options from argsparse.Namespace to client object"""
 
-
     def __init__(self, *args, **kwargs):
         self.copy = []
         super().__init__(*args, **kwargs)
@@ -444,8 +468,8 @@ class CopyParser(argparse.ArgumentParser):
             self.copy.append(f.dest)
         return f
 
-    def parse_args(self, *args,**kwargs)->argparse.Namespace:
-        self.ns = super().parse_args(*args,**kwargs)
+    def parse_args(self, *args, **kwargs) -> argparse.Namespace:
+        self.ns = super().parse_args(*args, **kwargs)
         return self.ns
 
     def transfer(self, client: Any) -> None:
@@ -469,7 +493,7 @@ def main():
                         copy=True)
     parser.add_argument('--no_wrappers', dest='build_wrappers', action='store_false',
                         help="Skip building wrappers'", copy=True)
-    parser.add_argument('--no-software-explorer',action='store_false',dest='software_explorer',
+    parser.add_argument('--no-software-explorer', action='store_false', dest='software_explorer',
                         help="Skip building software explorer drop-ins", copy=True)
     parser.add_argument('--control', help="Add software tags to control file", copy=True)
 
