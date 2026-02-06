@@ -145,6 +145,54 @@ def get_yaml_filename_from_package(package_name: str) -> str:
     return f"{base_name}.yaml"
 
 
+def verify_yaml_paths(yaml_file: str) -> bool:
+    """
+    Verify that all paths in the YAML file's 'run' section exist.
+
+    Args:
+        yaml_file: Path to the YAML file to verify
+
+    Returns:
+        True if all paths exist, False if any are missing
+    """
+    yaml = YAML()
+
+    try:
+        with open(yaml_file, 'r') as f:
+            config = yaml.load(f)
+    except Exception as e:
+        builder_logger.error(f"Error reading {yaml_file} for verification: {e}")
+        return False
+
+    if 'run' not in config:
+        builder_logger.warning(f"No 'run' section found in {yaml_file}")
+        return True
+
+    run_section = config['run']
+    missing_paths = []
+    existing_count = 0
+
+    for exe_name, exe_path in run_section.items():
+        path = Path(exe_path)
+        if path.exists():
+            existing_count += 1
+            builder_logger.debug(f"  ✓ {exe_name}: {exe_path}")
+        else:
+            missing_paths.append((exe_name, exe_path))
+            builder_logger.warning(f"  ✗ {exe_name}: {exe_path} does not exist")
+
+    total_paths = len(run_section)
+    builder_logger.info(f"Path verification: {existing_count}/{total_paths} paths exist")
+
+    if missing_paths:
+        builder_logger.error(f"Found {len(missing_paths)} missing path(s):")
+        for exe_name, exe_path in missing_paths:
+            builder_logger.error(f"  - {exe_name}: {exe_path}")
+        return False
+
+    return True
+
+
 def generate_yaml_config(package_name, output_file=None, package_info=None):
     """
     Generate YAML configuration file for a package.
@@ -206,9 +254,8 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         executables.sort(key=lambda x: x[0])
 
         for exe_name, exe_path in executables:
-            # Target path is always /usr/software/bin/<exe_name>
-            target_path = f"/usr/software/bin/{exe_name}"
-            run_section[exe_name] = target_path
+            # Use the actual path from the package
+            run_section[exe_name] = exe_path
 
         config['run'] = run_section
     else:
@@ -228,12 +275,20 @@ def generate_yaml_config(package_name, output_file=None, package_info=None):
         builder_logger.warning(f"Error writing {output_file}: {e}")
         return False
 
+    builder_logger.info(f"Generated {output_file}")
     builder_logger.info(f"  Software: {info.software}")
     builder_logger.info(f"  Package: {package_name}")
     builder_logger.info(f"  Commands:")
     for exe_name, _ in executables:
         builder_logger.info(f"    - {exe_name}")
 
+    # Verify all paths in the generated YAML exist
+    builder_logger.info(f"Verifying paths in {output_file}...")
+    if not verify_yaml_paths(output_file):
+        builder_logger.error(f"Path verification failed for {output_file}")
+        return False
+
+    builder_logger.info(f"✓ All paths verified successfully")
     return True
 
 
