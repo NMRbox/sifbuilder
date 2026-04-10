@@ -17,9 +17,7 @@ from argparser_adapter import ChoiceCommand, ArgparserAdapter
 
 import sifbuilder
 from sifbuilder.sourceinfo import SourceInfo
-from sifbuilder import builder_logger
-
-APPTAINER = Path('/usr/bin/apptainer')
+from sifbuilder import builder_logger, APPTAINER, generate_manifest
 
 
 def executable(path, flags):
@@ -67,24 +65,38 @@ class Builder:
         self.force = False
         self.nolog = False
         self.build_wrappers = False
+        self.pem_key: Path | None = None
+        self.run_key: str | None = None
         self.software: list[str] = []
-        self._control: Path | None = None
         self.apps = {}  # clients from found YAML
         self.commands = {}  # commands execute in sif
         self.software_map = {}  # executable to NMRbox software
         self.configuration_data = []  # record of configuration data for metadata file
         self.software_explorer = True
+        self._manifest = None
 
     @property
-    def control(self):
-        return self._control
+    def manifest(self):
+        return self._manifest
 
-    @control.setter
-    def control(self, value):
-        if value:
-            self._control = Path(value)
-            if not self.control.is_file():
-                raise FileNotFoundError(self.control.as_posix())
+    @manifest.setter
+    def manifest(self,value):
+        if value is not None:
+            self._manifest = Path(value)
+
+    @property
+    def pem_key(self) -> Path | None:
+        return self._pem_key
+
+    @pem_key.setter
+    def pem_key(self, value):
+        if value is not None:
+            p = Path(value)
+            if not p.is_file():
+                raise FileNotFoundError(f"PEM key not found: {p}")
+            self._pem_key = p
+        else:
+            self._pem_key = None
 
     def _load_directory(self, config: dict, key: str):
         """Get directory out of config, verify parent, and make it"""
@@ -101,7 +113,7 @@ class Builder:
         with open(primary) as f:
             aconfig = yaml.safe_load(f)
         self.base = Path(aconfig['base'])
-        self.installed = aconfig['installed']
+        self._installed = Path(aconfig['installed'])
         self.support_packages = aconfig['support packages']
         self.readme = aconfig['readme']
         self.use_sandbox = aconfig['sandbox build']
@@ -112,6 +124,14 @@ class Builder:
                 source = primary.parent / source
                 self.files[source.as_posix()] = dest
         self.metadata = aconfig.get('metadata')
+        if self.pem_key is None and (pk := aconfig.get('pemkey')):
+            pk_path = Path(pk)
+            if not pk_path.is_absolute():
+                pk_path = primary.parent / pk_path
+            self.pem_key = pk_path
+        self.run_key = aconfig.get('runkey')
+        if self.pem_key is not None and self.run_key is None:
+            raise ValueError("pemkey is specified but runkey is missing from YAML configuration")
 
         self.wrapper_dir = self._load_directory(aconfig, 'wrappers')
         self.sw_exp_dir = self._load_directory(aconfig, 'software explorer')
@@ -121,6 +141,11 @@ class Builder:
         self.defpath = Path(self.product + '.def')
         self.sandbox_path = Path(self.product + '.sandbox/')
         self.sifpath = Path(self.product + '.sif')
+
+    @property
+    def installed(self)->Path:
+        return self._installed.parent / self.sifpath.name
+
 
     @property
     def metadata_name(self) -> str:
@@ -256,7 +281,6 @@ class Builder:
             self._add_help(f)
 
         print(f"Wrote {self.defpath}")
-        self._update_control()
         self.gen_swe()
 
     def add_environment(self, f):
@@ -301,6 +325,8 @@ class Builder:
             else:
                 self.sifpath.unlink()
         self.sifpath.parent.mkdir(exist_ok=True)
+        if self.manifest:
+            self.manifest.parent.mkdir(exist_ok=True)
 
     def _run(self, cmd_i, verify: bool = True) -> subprocess.CompletedProcess:
         """Run a command after displaying to user. If verify and error, exit program"""
@@ -319,33 +345,6 @@ class Builder:
             sys.exit(cp.returncode)
         return cp
 
-    def _update_control(self):
-        if self.control and self.software:
-            current = set()
-            with open(self.control) as f:
-                content = f.readlines()
-            output = []
-            for line in content:
-                if not line.startswith('XB-Nmrbox-Include'):
-                    output.append(line.rstrip(' \n'))
-            ordered = sorted(self.software)
-            assert len(ordered) > 0
-            first_package = False
-            added_includes = False
-            with open(self.control, 'w') as f:
-                for line in output:
-                    if not added_includes:
-                        if not first_package and line.startswith('Package'):
-                            first_package = True
-                            builder_logger.debug(f"{line} first package")
-                        if first_package and len(line.strip()) == 0:
-                            for index, software in enumerate(ordered):
-                                print(f"XB-Nmrbox-Include{index}: {software}", file=f)
-                            added_includes = True
-                            builder_logger.info('added Nmrbox-Includes')
-                    print(line, file=f)
-            print(f"{self.control.as_posix()} updated")
-            self.control = None  # make idempotent
 
     @ChoiceCommand(actionchoice)
     def sif(self):
@@ -356,17 +355,21 @@ class Builder:
         self._check_paths(caller_is_sandbox=False)
         if self.build_wrappers:
             self.wrappers()
-
         cmd = [APPTAINER, 'build']
         if (uid := os.geteuid()) != 0:
             builder_logger.debug(f"uid is {uid}, adding fakeroot")
             cmd.append('--fakeroot')
+        if self.pem_key is not None:
+            cmd.extend(('--pem-path', self.pem_key))
         if self.use_sandbox:
             cmd.extend((self.sifpath, self.sandbox_path))
         else:
             cmd.extend((self.sifpath, self.defpath))
         self._run(cmd)
-        self._update_control()
+        if self.manifest is not None:
+            assert isinstance(self.manifest,Path)
+            generate_manifest(self.sifpath,self.manifest)
+
 
     @ChoiceCommand(actionchoice)
     def sandbox(self):
@@ -377,6 +380,7 @@ class Builder:
     @ChoiceCommand(actionchoice)
     def wrappers(self):
         """Generate wrappers to invoke app in container"""
+        sif_path = self.installed.as_posix()
         for command in self.commands.keys():
             wfile = self.wrapper_dir / command
             if wfile.is_file() and not self.force:
@@ -384,7 +388,8 @@ class Builder:
                 continue
             with open(wfile, 'w', opener=executable) as f:
                 print('#!/bin/bash', file=f)
-                print(f'exec {APPTAINER} run --app {command} {self.installed} "$@"', file=f)
+                pem_arg = f'--pem-path {self.run_key} ' if self.run_key else ''
+                print(f'exec {APPTAINER} run {pem_arg}--app {command} {sif_path} "$@"', file=f)
             builder_logger.info(f"Generated {wfile.as_posix()}")
 
     @ChoiceCommand(actionchoice)
@@ -495,7 +500,8 @@ def main():
                         help="Skip building wrappers'", copy=True)
     parser.add_argument('--no-software-explorer', action='store_false', dest='software_explorer',
                         help="Skip building software explorer drop-ins", copy=True)
-    parser.add_argument('--control', help="Add software tags to control file", copy=True)
+    parser.add_argument('--manifest', help="Generate manifest file", copy=True)
+    parser.add_argument('--sifname', help="Override output sif filename")
 
     args = parser.parse_args()
     builder_logger.setLevel(getattr(logging, args.loglevel))
@@ -503,6 +509,8 @@ def main():
     dp = _DirectoryParser(ParseSpec(args.directory, args.depth))
     yamls = dp.parse()
     builder.load(args.primary)
+    if args.sifname:
+        builder.sifpath = Path(args.sifname)
     builder.configure(yamls)
 
     adapter.call_specified_methods(args)

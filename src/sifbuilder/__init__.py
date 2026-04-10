@@ -1,5 +1,7 @@
 import logging
-import importlib.metadata 
+import importlib.metadata
+from pathlib import Path
+
 builder_logger = logging.getLogger(__name__)
 __version__ =  importlib.metadata.version('sifbuilder') 
 
@@ -42,3 +44,6 @@ class Package:
         return None
 
 from sifbuilder.sourceinfo import SourceInfo
+
+APPTAINER = Path('/usr/bin/apptainer')
+from sifbuilder.manifest import generate_manifest
