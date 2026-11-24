@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import logging
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -117,6 +118,8 @@ class Builder:
         """Add environment setting from config, if any"""
         print(_ENV, file=f)
         edict = self.config.get("environment", {})
+        for env, value in edict.get('set', {}).items():
+            print(f'    export {env}={shlex.quote(str(value))}', file=f)
         for env, value in edict.get('append', {}).items():
             print(f'    export {env}=${env}:{value}', file=f)
 

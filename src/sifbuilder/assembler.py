@@ -4,6 +4,7 @@ import gzip
 import io
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -210,6 +211,8 @@ class Builder:
             edict = app_cfg.get("environment", {})
             if edict:
                 with io.StringIO() as f:
+                    for env, value in edict.get('set', {}).items():
+                        print(f'    export {env}={shlex.quote(str(value))}', file=f)
                     for env, value in edict.get('append', {}).items():
                         print(f'    export {env}=${env}:{value}', file=f)
                     app_d[_EKEY] = f.getvalue()
