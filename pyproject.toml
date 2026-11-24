@@ -1,7 +1,7 @@
 [project]
 name = "sifbuilder"
 description = "TBD"
-license = {text = "MIT" }
+license = "MIT"
 version = "2.0"
 dependencies = [ 'pyyaml', 'python-debian', 'argparser_adapter','ruamel.yaml'
 ]
@@ -26,7 +26,7 @@ generate-assembly = "sifbuilder.generate:main"
 list-software = "sifbuilder.list_current_software:main"
 
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv.pip]

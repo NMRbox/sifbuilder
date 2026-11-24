@@ -16,7 +16,7 @@ import yaml
 from argparser_adapter import ChoiceCommand, ArgparserAdapter
 
 import sifbuilder
-from sifbuilder.sourceinfo import SourceInfo
+from sifbuilder.sourceinfo import SourceInfo, UnversionedError
 from sifbuilder import builder_logger, APPTAINER, generate_manifest
 
 
@@ -170,18 +170,29 @@ class Builder:
         paths = [Path(y) for y in yamls]
         bad = [m for m in paths if not m.is_file()]
         if bad:
-            raise ValueError(f"Missing yaml file {','.join(bad)}")
+            raise ValueError(f"Missing yaml file {','.join(b.as_posix() for b in bad)}")
+        skipped: list[str] = []
         for p in paths:
             builder_logger.debug(f"Evaluate {p.as_posix()}")
             try:
                 with open(p) as f:
                     dc = yaml.safe_load(f)
                     if dc.get('sifassembly', False):
-                        dc['_origin'] = SourceInfo.parse(p).ident()
+                        try:
+                            dc['_origin'] = SourceInfo.parse(p).ident(force=self.force)
+                        except UnversionedError:
+                            if not self.force:
+                                raise
+                            builder_logger.warning(f"Including unversioned {p.as_posix()} (--force)")
+                            dc['_origin'] = f'{p.resolve().as_posix()} (unversioned)'
                         builder_logger.info(f"Reading {p.as_posix()}")
                         self.configuration_data.append(dc)
             except Exception as e:
-                builder_logger.info(f"Fail to parse {p.as_posix()} {e}")
+                builder_logger.warning(f"SKIPPING {p.as_posix()}: {e}")
+                skipped.append(p.as_posix())
+        if skipped:
+            builder_logger.warning(f"{len(skipped)} yaml file(s) NOT included in build:\n    "
+                                   + "\n    ".join(skipped))
         ordered = {c['app']: c for c in self.configuration_data}
         for appname in sorted(ordered.keys()):
             app_cfg = ordered[appname]
@@ -493,7 +504,8 @@ def main():
     parser.add_argument('-d', '--directory', action='append', help="Directory to scan for yamls")
     parser.add_argument('--depth', type=int, default=0, help="How far to descond into directories looking for yamls")
     parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
-    parser.add_argument('--force', action='store_true', help="Overwrite existing def and sif", copy=True)
+    parser.add_argument('--force', action='store_true', help="Overwrite existing def and sif; include yamls that are unversioned or not committed",
+                        copy=True)
     parser.add_argument('--nolog', action='store_true', help="Apptainer output to stdout/stderr instead of log files",
                         copy=True)
     parser.add_argument('--no_wrappers', dest='build_wrappers', action='store_false',
